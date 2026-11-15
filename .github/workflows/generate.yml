@@ -1,11 +1,13 @@
 name: Generate Bun dependencies
 
 on:
+  schedule:
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       version:
-        description: oh-my-pi version without the v prefix
-        required: true
+        description: oh-my-pi version without the v prefix; latest when omitted
+        required: false
         type: string
 
 permissions:
@@ -15,33 +17,51 @@ jobs:
   generate:
     runs-on: ubuntu-24.04
     steps:
-      - name: Validate version
+      - name: Resolve version
+        id: version
         env:
-          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          [[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "invalid version: ${VERSION}" >&2
+          version=${INPUT_VERSION}
+          if [[ -z ${version} ]]; then
+            version=$(gh api repos/can1357/oh-my-pi/releases/latest --jq .tag_name)
+            version=${version#v}
+          fi
+          [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "invalid version: ${version}" >&2
             exit 1
           }
+          rebuild=true
+          if [[ -z ${INPUT_VERSION} ]] && gh release view "v${version}" >/dev/null 2>&1; then
+            rebuild=false
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+          echo "rebuild=${rebuild}" >> "${GITHUB_OUTPUT}"
 
       - name: Check out oh-my-pi
+        if: steps.version.outputs.rebuild == 'true'
         uses: actions/checkout@v6
         with:
           repository: can1357/oh-my-pi
-          ref: v${{ inputs.version }}
+          ref: v${{ steps.version.outputs.value }}
 
       - name: Set up Bun
+        if: steps.version.outputs.rebuild == 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
 
       - name: Install locked dependencies
+        if: steps.version.outputs.rebuild == 'true'
         run: bun install --frozen-lockfile --ignore-scripts --backend=copyfile
 
       - name: Create deterministic archive
+        if: steps.version.outputs.rebuild == 'true'
         id: archive
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
           stage="oh-my-pi-${VERSION}"
           archive="oh-my-pi-${VERSION}-node-deps.tar.xz"
@@ -60,9 +80,10 @@ jobs:
           echo "path=${archive}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish release asset
+        if: steps.version.outputs.rebuild == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.value }}
           ARCHIVE: ${{ steps.archive.outputs.path }}
         run: |
           tag="v${VERSION}"
