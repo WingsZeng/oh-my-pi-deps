@@ -1,0 +1,72 @@
+name: Generate Bun dependencies
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: oh-my-pi version without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "invalid version: ${VERSION}" >&2
+            exit 1
+          }
+
+      - name: Check out oh-my-pi
+        uses: actions/checkout@v6
+        with:
+          repository: can1357/oh-my-pi
+          ref: v${{ inputs.version }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile --ignore-scripts --backend=copyfile
+
+      - name: Create deterministic archive
+        id: archive
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          stage="oh-my-pi-${VERSION}"
+          archive="oh-my-pi-${VERSION}-node-deps.tar.xz"
+          mkdir "${stage}"
+          mv node_modules "${stage}/"
+          tar \
+            --sort=name \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --mtime=@0 \
+            --format=gnu \
+            -cf - "${stage}" \
+            | xz -T2 -9e > "${archive}"
+          sha256sum "${archive}"
+          echo "path=${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          ARCHIVE: ${{ steps.archive.outputs.path }}
+        run: |
+          tag="v${VERSION}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --notes ""
+          fi
+          gh release upload "${tag}" "${ARCHIVE}" --clobber
